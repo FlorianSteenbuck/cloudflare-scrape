@@ -32,10 +32,14 @@ class CloudflareScraper(Session):
 
     def request(self, method, url, *args, **kwargs):
         resp = super(CloudflareScraper, self).request(method, url, *args, **kwargs)
-
         # Check if Cloudflare anti-bot is on
-        if ( "URL=/cdn-cgi/" in resp.headers.get("Refresh", "") and
-             resp.headers.get("Server", "") == "cloudflare-nginx" ):
+        if (resp.headers.get("Server", "") == "cloudflare-nginx" and
+                 ( "URL=/cdn-cgi/" in resp.headers.get("Refresh", "") or
+                   (resp.status_code == 503 and
+                    re.search(r'<form id="challenge-form".+?DDoS protection by CloudFlare', resp.text, re.I | re.DOTALL)
+                   )
+                 )
+            ): # Sometimes cloud flare sends a 503 status_code with no "Refresh" header for DDos protection.
             return self.solve_cf_challenge(resp, **kwargs)
 
         # Otherwise, no Cloudflare anti-bot detected
