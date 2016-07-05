@@ -3,8 +3,30 @@ import random
 import re
 import os
 from requests.sessions import Session
-import execjs
 
+try:
+    import execjs
+    is_execjs_imported = True
+except:
+    is_execjs_imported = False
+    
+if not is_execjs_imported:    
+    try:
+        """
+        Name: Js2Py
+        Version: 0.37
+        Summary: JavaScript to Python Translator & JavaScript interpreter written in 100% pure Python.
+        Home-page: https://github.com/PiotrDabkowski/Js2Py
+        Author: Piotr Dabkowski
+        Author-email: piotr.dabkowski@balliol.ox.ac.uk
+        License: MIT
+        Description: Translates JavaScript to Python code. Js2Py is able to translate and execute virtually any JavaScript code.
+        """
+        
+        import js2py
+    except:
+        raise
+    
 try:
     from urlparse import urlparse
 except ImportError:
@@ -77,7 +99,10 @@ class CloudflareScraper(Session):
             raise
 
         # Safely evaluate the Javascript expression
-        params["jschl_answer"] = str(int(execjs.exec_(js)) + len(domain))
+        if is_execjs_imported:
+            params["jschl_answer"] = str(int(execjs.exec_(js)) + len(domain))
+        else:
+            params["jschl_answer"] = str(int(js2py.eval_js(js)) + len(domain))
 
         return self.get(submit_url, **kwargs)
 
@@ -91,27 +116,32 @@ class CloudflareScraper(Session):
         # These characters are not currently used in Cloudflare's arithmetic snippet
         js = re.sub(r"[\n\\']", "", js)
 
-        if "Node" in self.js_engine:
-            # Use vm.runInNewContext to safely evaluate code
-            # The sandboxed code cannot use the Node.js standard library
-            return "return require('vm').runInNewContext('%s');" % js
-
-        return js.replace("parseInt", "return parseInt")
+        if is_execjs_imported:
+            if "Node" in self.js_engine:
+                # Use vm.runInNewContext to safely evaluate code
+                # The sandboxed code cannot use the Node.js standard library
+                return "return require('vm').runInNewContext('%s');" % js
+            else:
+                return js.replace("parseInt", "return parseInt")
+        else:
+            return js
 
     @classmethod
     def create_scraper(cls, sess=None, js_engine=None):
         """
         Convenience function for creating a ready-to-go requests.Session (subclass) object.
         """
-        if js_engine:
-            os.environ["EXECJS_RUNTIME"] = js_engine
 
-        js_engine = execjs.get().name
+        if is_execjs_imported:
+            if js_engine:
+                os.environ["EXECJS_RUNTIME"] = js_engine
 
-        if not ("Node" in js_engine or "V8" in js_engine):
-            raise EnvironmentError("Your Javascript runtime '%s' is not supported due to security concerns. "
-                                   "Please use Node.js or PyV8. To force a specific engine, "
-                                   "such as Node, call create_scraper(js_engine=\"Node\")" % js_engine)
+            js_engine = execjs.get().name
+
+            if not ("Node" in js_engine or "V8" in js_engine):
+                raise EnvironmentError("Your Javascript runtime '%s' is not supported due to security concerns. "
+                                       "Please use Node.js or PyV8. To force a specific engine, "
+                                       "such as Node, call create_scraper(js_engine=\"Node\")" % js_engine)
 
         scraper = cls(js_engine=js_engine)
 
