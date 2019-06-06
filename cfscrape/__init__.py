@@ -3,7 +3,7 @@ import random
 import re
 import os
 from requests.sessions import Session
-
+import json
 try:
     import execjs
     is_execjs_imported = True
@@ -42,6 +42,40 @@ DEFAULT_USER_AGENTS = [
 
 DEFAULT_USER_AGENT = random.choice(DEFAULT_USER_AGENTS)
 
+def path_to_value(dict_, path, default=None):
+    for key in dict_.keys():
+        if key != path[0]:
+            continue 
+        value = dict_[key]
+        if type(value) == dict and len(path) != 1:
+            return path_to_value(dict_, path[1:])
+        elif len(path) == 1:
+            return value
+    return default
+"""
+def number_magic(value, index=0):
+    number = 0.0
+    tail_operator = ""
+    working = 
+    while index < len(value):
+        char = value
+        if in ["+","-","*","/","&",">>>","<<",">>","^","&","|"]:
+"""
+
+def hira_last_add(ls, appendy):
+    append_index = None
+    append_list = None
+
+    for x in range(len(ls)):
+        if type(ls[x]) == list:
+            append_index = x
+            append_list = ls[x]
+
+    if type(append_index) == int:
+        ls[append_index] = hira_last_add(append_list, appendy)
+    else:
+        ls.append(appendy)
+    return ls
 
 class CloudflareScraper(Session):
     def __init__(self, *args, **kwargs):
@@ -50,17 +84,16 @@ class CloudflareScraper(Session):
 
         if "requests" in self.headers["User-Agent"]:
             # Spoof Firefox on Linux if no custom User-Agent has been set
-            self.headers["User-Agent"] = DEFAULT_USER_AGENT
+            self.headers["User-Agent"] = "Mozilla/5.0 (X11; Linux x86_64; rv:66.0) Gecko/20100101 Firefox/66.0"
 
     def request(self, method, url, *args, **kwargs):
         resp = super(CloudflareScraper, self).request(method, url, *args, **kwargs)
+        print(resp.content)
         # Check if Cloudflare anti-bot is on
-        if (resp.headers.get("Server", "") == "cloudflare-nginx" and
-                 ( "URL=/cdn-cgi/" in resp.headers.get("Refresh", "") or
-                   (resp.status_code == 503 and
-                    re.search(r'<form id="challenge-form".+?DDoS protection by CloudFlare', resp.text, re.I | re.DOTALL)
-                   )
-                 )
+        if ("URL=/cdn-cgi/" in resp.headers.get("Refresh", "") or
+                (resp.status_code == 503 and
+                  re.search(r'<form id="challenge-form".+?DDoS protection by CloudFlare', resp.text, re.I | re.DOTALL)
+                )
             ): # Sometimes cloud flare sends a 503 status_code with no "Refresh" header for DDos protection.
             return self.solve_cf_challenge(resp, **kwargs)
 
@@ -68,10 +101,11 @@ class CloudflareScraper(Session):
         return resp
 
     def solve_cf_challenge(self, resp, **kwargs):
-        time.sleep(5)  # Cloudflare requires a delay before solving the challenge
+        time.sleep(4)  # Cloudflare requires a delay before solving the challenge
 
         body = resp.text
         parsed_url = urlparse(resp.url)
+        path = parsed_url.path
         domain = urlparse(resp.url).netloc
         submit_url = "%s://%s/cdn-cgi/l/chk_jschl" % (parsed_url.scheme, domain)
 
@@ -80,11 +114,19 @@ class CloudflareScraper(Session):
         headers["Referer"] = resp.url
 
         try:
+            params["s"] = re.findall(r'name="s" value="(.+?)"', body)[-1]
             params["jschl_vc"] = re.findall(r'name="jschl_vc" value="(\w+)"', body)[-1]
             params["pass"] = re.findall(r'name="pass" value="(.+?)"', body)[-1]
 
             # Extract the arithmetic operation
-            js = self.extract_js(body)
+            secret = self.extract_js(body)
+            secret += len(domain+path)
+
+            context = js2py.EvalJs({'value': secret})
+            context.execute("value = value.toFixed(10);")
+            secret = context.value
+            print(secret)
+            params["jschl_answer"] = secret
 
         except Exception:
             # Something is wrong with the page.
@@ -97,18 +139,104 @@ class CloudflareScraper(Session):
                   "https://github.com/Anorov/cloudflare-scrape#updates "
                   "before submitting a bug report.\n")
             raise
-
-        # Safely evaluate the Javascript expression
-        if is_execjs_imported:
-            params["jschl_answer"] = str(int(execjs.exec_(js)) + len(domain))
-        else:
-            params["jschl_answer"] = str(int(js2py.eval_js(js)) + len(domain))
-
+        print(kwargs["params"])
         return self.get(submit_url, **kwargs)
 
     def extract_js(self, body):
         js = re.search(r"setTimeout\(function\(\){\s+(var "
                         "s,t,o,p,b,r,e,a,k,i,n,g,f.+?\r?\n[\s\S]+?a\.value =.+?)\r?\n", body).group(1)
+        
+        # TODO support add all call method of js_dict
+        # TODO regexless
+        root_bastard = re.compile('(([ \\t]+|)(;|,|:|=|)([ \t]+|)(var |"|\'|)([ \\t]+|)(?P<key>[A-Za-z.]+)([ \\t]+|)("|\'|)(?P<operator>(:|=|(\\+|\\-|\\*|\\/|\\&|>>>|<<|>>|\\^|\\&|\\|)=))([ \t]+|)((?P<value>[^;]+)(;|,)|))')
+        
+        statements = []
+        for statement in re.finditer(root_bastard, js):
+            statements.append(statement.groupdict())
+
+        hidden_value = 0
+        find_dotted = "(([A-Za-z0-9]+)((\\.[A-Za-z0-9]+)+))"
+        hidden_path = []
+        for state in statements:
+            if state["key"].strip().endswith(".value"):
+                for may_hidden in re.findall(find_dotted, state["value"]):
+                    if may_hidden[0].endswith(".length"):
+                        continue
+                    hidden_path = may_hidden[0].split(".")
+                    break
+
+        context = js2py.EvalJs({'value': None})
+        calc = None
+        hidden_keys = ["[\""+"\"][\"".join(hidden_path)+"\"]", "['"+"']['".join(hidden_path)+"']",".".join(hidden_path)]
+        for state in statements:
+            is_js_dict = state["value"].strip().startswith("{")
+            key = state["key"].strip()
+            operator = state["operator"]
+            if operator == ":":
+                operator = "="
+            value = state["value"]
+            if (len(hidden_path) > 0 and is_js_dict and key == hidden_path[0]) or (key in hidden_keys):
+                if is_js_dict:
+                    new_chars = ""
+                    last_chars = ""
+                    for x in range(len(value)):
+                        if last_chars == "\":" or last_chars == "':" or value[x] == ",":
+                            new_chars += "\""
+                        if len(last_chars) == 2:
+                            last_chars = last_chars[1:]
+                        last_chars += value[x]
+                        new_chars += value[x]
+                    if new_chars.endswith("}"):
+                        new_chars = new_chars[:len(new_chars)-1]+"\"}"
+                    else:
+                        new_chars += "\"}"
+                    value = path_to_value(json.loads(new_chars), hidden_path[1:])
+                if value is None:
+                    continue
+
+                print("value"+operator+value)
+                context.execute("value"+operator+value)
+
+                """
+                region_mess = []
+                region_deepness = 0
+                last_deepness = -1
+                trues = ["!+[]", "!![]"]
+                
+                collecty = ""
+                number = 0
+                operator = None
+                for char in value:
+                    if char == "(":
+                        if type(operator) in [str, chr, unicode]:
+                            region_mess.append(operator)
+                            operator = None
+                        region_deepness+=1
+                        continue
+                    elif char == ")":
+                        region_mess.append(number)
+                        number = 0
+                        collecty = ""
+                        operator = ""
+                        region_deepness-=1
+                        continue
+
+                    if type(operator) == str:
+                        operator += char
+                    else:
+                        collecty += char
+                        for true in trues:
+                            if collecty.endswith(true):
+                                number+=1
+                                break
+                print(value)
+                print(region_mess)
+                """
+        print(statements)
+        print(context.value)
+        return context.value
+
+        """
         js = re.sub(r"a\.value = (parseInt\(.+?\)).+", r"\1", js)
         js = re.sub(r"\s{3,}[a-z](?: = |\.).+", "", js)
 
@@ -125,6 +253,7 @@ class CloudflareScraper(Session):
                 return js.replace("parseInt", "return parseInt")
         else:
             return js
+        """
 
     @classmethod
     def create_scraper(cls, sess=None, js_engine=None):
